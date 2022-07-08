@@ -1,3 +1,10 @@
+(Note for cache_trace)
+Only ./callgrind/sim.c has been modified.
+To use memory trace generation (with cache filtering), run callgrind with simulate-wb option.
+(--tool=callgrind and --simulate-wb=yes is necessary)
+e.g., valgrind --tool=callgrind --simulate-wb=yes --simulate-hwpref=yes --log-fd=2 [cmd] 2> [output_result]
+
+-------------------------------
 
 Release notes for Valgrind
 ~~~~~~~~~~~~~~~~~~~~~~~~~~
