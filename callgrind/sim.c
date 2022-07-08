@@ -23,9 +23,7 @@
    General Public License for more details.
 
    You should have received a copy of the GNU General Public License
-   along with this program; if not, write to the Free Software
-   Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA
-   02111-1307, USA.
+   along with this program; if not, see <http://www.gnu.org/licenses/>.
 
    The GNU General Public License is contained in the file COPYING.
 */
@@ -184,7 +182,7 @@ static void cachesim_initcache(cache_t config, cache_t2* c)
    c->sets_min_1     = c->sets - 1;
    c->line_size_bits = VG_(log2)(c->line_size);
    c->tag_shift     = c->line_size_bits + VG_(log2)(c->sets);
-   c->tag_mask       = ~((1u<<c->tag_shift)-1);
+   c->tag_mask       = ~((1ul<<c->tag_shift)-1); 
 
    /* Can bits in tag entries be used for flags?
     * Should be always true as MIN_LINE_SIZE >= 16 */
@@ -349,10 +347,16 @@ CacheModelResult cachesim_D1_ref(Addr a, UChar size)
  * this cache line (CACHELINE_DIRTY = 1). By OR'ing the reference
  * type (Read/Write), the line gets dirty on a write.
  */
+
+/* Ref function for LL */
+#define CACHELINE_DIRTY_UL 1ul
 __attribute__((always_inline))
 static __inline__
-CacheResult cachesim_setref_wb(cache_t2* c, RefType ref, UInt set_no, UWord tag)
+CacheResult cachesim_setref_wb(cache_t2* c, RefType ref, UInt set_no, UWord tag, Addr a)
 {
+	/* Parameter 'Addr a' has been added, but its purpose is just debugging (Referenced addr)*/
+	Addr rest_a;
+
     int i, j;
     UWord *set, tmp_tag;
 
@@ -361,14 +365,15 @@ CacheResult cachesim_setref_wb(cache_t2* c, RefType ref, UInt set_no, UWord tag)
     /* This loop is unrolled for just the first case, which is the most */
     /* common.  We can't unroll any further because it would screw up   */
     /* if we have a direct-mapped (1-way) cache.                        */
-    if (tag == (set[0] & ~CACHELINE_DIRTY)) {
-	set[0] |= ref;
+
+    if (tag == (set[0] & ~CACHELINE_DIRTY_UL)) {
+		set[0] |= ref;
         return Hit;
     }
     /* If the tag is one other than the MRU, move it into the MRU spot  */
     /* and shuffle the rest down.                                       */
     for (i = 1; i < c->assoc; i++) {
-	if (tag == (set[i] & ~CACHELINE_DIRTY)) {
+	if (tag == (set[i] & ~CACHELINE_DIRTY_UL)) {
 	    tmp_tag = set[i] | ref; // update dirty flag
             for (j = i; j > 0; j--) {
                 set[j] = set[j - 1];
@@ -379,11 +384,23 @@ CacheResult cachesim_setref_wb(cache_t2* c, RefType ref, UInt set_no, UWord tag)
     }
 
     /* A miss;  install this tag as MRU, shuffle rest down. */
-    tmp_tag = set[c->assoc - 1];
+    tmp_tag = set[c->assoc - 1]; // victim (if dirty -> MemWrite)
     for (j = c->assoc - 1; j > 0; j--) {
         set[j] = set[j - 1];
     }
     set[0] = tag | ref;
+	// If load miss -> MemRead
+	
+	/* Added code */
+	if (tmp_tag & CACHELINE_DIRTY_UL) { // If victim is dirty, write-back
+		/* If empty, then clean anyway */
+		rest_a = (tmp_tag&~CACHELINE_DIRTY_UL) | (set_no << c->line_size_bits);
+		VG_(printf)("[W %lx]\n", rest_a);
+	}
+
+	/* LL miss (load/store both) needs MemRead */
+	rest_a = tag | (set_no << c->line_size_bits);
+	VG_(printf)("[R %lx]\n", rest_a);
 
     return (tmp_tag & CACHELINE_DIRTY) ? MissDirty : Miss;
 }
@@ -397,8 +414,9 @@ CacheResult cachesim_ref_wb(cache_t2* c, RefType ref, Addr a, UChar size)
     UWord tag = a & c->tag_mask;
 
     /* Access entirely within line. */
-    if (set1 == set2)
-	return cachesim_setref_wb(c, ref, set1, tag);
+    if (set1 == set2) {
+		return cachesim_setref_wb(c, ref, set1, tag, a);
+	}
 
     /* Access straddles two lines. */
     /* Nb: this is a fast way of doing ((set1+1) % c->sets) */
@@ -406,8 +424,8 @@ CacheResult cachesim_ref_wb(cache_t2* c, RefType ref, Addr a, UChar size)
 	UWord tag2  = (a+size-1) & c->tag_mask;
 
 	/* the call updates cache structures as side effect */
-	CacheResult res1 =  cachesim_setref_wb(c, ref, set1, tag);
-	CacheResult res2 =  cachesim_setref_wb(c, ref, set2, tag2);
+	CacheResult res1 =  cachesim_setref_wb(c, ref, set1, tag, a);
+	CacheResult res2 =  cachesim_setref_wb(c, ref, set2, tag2, a+size-1);
 
 	if ((res1 == MissDirty) || (res2 == MissDirty)) return MissDirty;
 	return ((res1 == Miss) || (res2 == Miss)) ? Miss : Hit;
@@ -435,18 +453,19 @@ CacheModelResult cachesim_I1_Read(Addr a, UChar size)
 static
 CacheModelResult cachesim_D1_Read(Addr a, UChar size)
 {
-    if ( cachesim_ref( &D1, a, size) == Hit ) return L1_Hit;
-    switch( cachesim_ref_wb( &LL, Read, a, size) ) {
-	case Hit: return LL_Hit;
-	case Miss: return MemAccess;
-	default: break;
-    }
+	if ( cachesim_ref( &D1, a, size) == Hit ) return L1_Hit;
+	switch( cachesim_ref_wb( &LL, Read, a, size) ) {
+		case Hit: return LL_Hit;
+		case Miss: return MemAccess;
+		default: break;
+	}
     return WriteBackMemAccess;
 }
 
 static
 CacheModelResult cachesim_D1_Write(Addr a, UChar size)
 {
+			
     if ( cachesim_ref( &D1, a, size) == Hit ) {
 	/* Even for a L1 hit, the write-trough L1 passes
 	 * the write to the LL to make the LL line dirty.
@@ -1627,8 +1646,12 @@ void CLG_(init_eventsets)()
     if (CLG_(clo).collect_alloc)
 	CLG_(register_event_group2)(EG_ALLOC, "allocCount", "allocSize");
 
-    if (CLG_(clo).collect_systime)
-	CLG_(register_event_group2)(EG_SYS, "sysCount", "sysTime");
+    if (CLG_(clo).collect_systime != systime_no) {
+       if (CLG_(clo).collect_systime == systime_nsec)
+          CLG_(register_event_group3)(EG_SYS, "sysCount", "sysTime", "sysCpuTime");
+       else
+          CLG_(register_event_group2)(EG_SYS, "sysCount", "sysTime");
+    }
 
     // event set used as base for instruction self cost
     CLG_(sets).base = CLG_(get_event_set2)(EG_USE, EG_IR);
@@ -1672,6 +1695,7 @@ void CLG_(init_eventsets)()
     CLG_(append_event)(CLG_(dumpmap), "allocSize");
     CLG_(append_event)(CLG_(dumpmap), "sysCount");
     CLG_(append_event)(CLG_(dumpmap), "sysTime");
+    CLG_(append_event)(CLG_(dumpmap), "sysCpuTime");
 }
 
 
